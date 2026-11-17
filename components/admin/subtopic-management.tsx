@@ -817,7 +817,7 @@ export function SubtopicManagement() {
           </AnimatePresence>
 
           <Card className="mb-5 p-4 sm:p-5">
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_150px_170px_190px_150px_auto] md:items-end">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-[minmax(0,1fr)_150px_170px_190px_150px_auto] xl:items-end">
               <label className="grid min-w-0 gap-1.5">
                 <span className="text-[10px] font-semibold text-slate-500">Search subtopics</span>
                 <span className="relative">

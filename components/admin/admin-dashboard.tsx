@@ -76,13 +76,17 @@ const adminQuickActions: Array<{
   href: string;
   icon: LucideIcon;
 }> = [
-  { label: "Manage Exams", description: "Review the exam overview", href: "#exam-statistics", icon: GraduationCap },
-  { label: "Manage Subjects", description: "Review subject coverage", href: "#catalog-overview", icon: BookOpen },
-  { label: "Manage Chapters", description: "Review chapter coverage", href: "#catalog-overview", icon: Layers3 },
-  { label: "Manage Questions", description: "Review recent questions", href: "#recent-questions", icon: FileQuestion },
-  { label: "Manage Teachers", description: "Review teacher activity", href: "#teacher-activity", icon: UserRound },
-  { label: "Manage Students", description: "Review registrations", href: "#student-registrations", icon: Users },
-  { label: "Daily Challenge Management", description: "Review scheduled challenges", href: "#upcoming-challenges", icon: CalendarDays },
+  { label: "Manage Exams", description: "Edit the exam catalog", href: "/admin/exams", icon: GraduationCap },
+  { label: "Manage Subjects", description: "Edit exam subjects", href: "/admin/subjects", icon: BookOpen },
+  { label: "Manage Chapters", description: "Edit subject chapters", href: "/admin/chapters", icon: Layers3 },
+  { label: "Manage Subtopics", description: "Edit chapter subtopics", href: "/admin/subtopics", icon: Layers3 },
+  { label: "Manage Questions", description: "Review the question bank", href: "/admin/questions", icon: FileQuestion },
+  { label: "Bulk Question Import", description: "Preview question imports", href: "/admin/import", icon: BookOpenCheck },
+  { label: "Manage Teachers", description: "Review teacher accounts", href: "/admin/teachers", icon: UserRound },
+  { label: "Manage Students", description: "Review student accounts", href: "/admin/students", icon: Users },
+  { label: "Daily Challenge Management", description: "Manage daily challenges", href: "/admin/challenges", icon: CalendarDays },
+  { label: "Analytics & Leaderboard", description: "Explore sample analytics", href: "/admin/analytics", icon: Activity },
+  { label: "Admin Settings", description: "Manage workspace preferences", href: "/admin/settings", icon: Settings },
 ];
 
 function AdminSidebar({ mobile = false, onClose }: { mobile?: boolean; onClose?: () => void }) {
@@ -477,11 +481,11 @@ export function AdminDashboard() {
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                   <div>
                     <h2 className="text-sm font-semibold text-[#142344]">Quick actions</h2>
-                    <p className="mt-1 text-[10px] text-slate-500">Jump to the related sample overview. Management screens are not connected.</p>
+                    <p className="mt-1 text-[10px] text-slate-500">Open a management page. Actions use sample data in this frontend preview.</p>
                   </div>
-                  <Badge variant="outline">Navigation preview</Badge>
+                  <Badge variant="outline">Frontend preview</Badge>
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
                   {adminQuickActions.map((action) => {
                     const Icon = action.icon;
                     return (
