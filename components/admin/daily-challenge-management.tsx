@@ -29,6 +29,7 @@ import {
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { LogoutButton } from "@/components/auth/logout-button";
 import {
   dailyChallengeQuestionBank,
   initialAdminDailyChallenges,
@@ -252,17 +253,17 @@ function ChallengeHeader({
               ) : null}
             </AnimatePresence>
           </div>
-          <Button
+          <LogoutButton
             variant="outline"
             size="sm"
             className="hidden !size-9 !min-h-9 !min-w-9 !p-0 rounded-xl sm:inline-flex sm:!h-9 sm:!w-auto sm:!px-3 max-[380px]:!hidden"
             aria-label="Log out"
-            title="Sign-out is not connected in this preview"
-            onClick={onLogout}
+            title="Log out of your account"
+            onLogout={onLogout}
           >
             <LogOut size={15} />
             <span className="hidden sm:inline">Log out</span>
-          </Button>
+          </LogoutButton>
         </div>
       </div>
     </header>
@@ -1087,7 +1088,7 @@ export function AdminDailyChallengeManagement() {
             setProfileOpen(false);
           }}
           onLogout={() => {
-            setFeedback("Sign-out is not connected in this frontend preview.");
+            setFeedback("Signing out...");
             setNotificationsOpen(false);
             setProfileOpen(false);
           }}

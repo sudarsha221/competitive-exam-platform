@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, GraduationCap, ShieldCheck } from "lucide-react";
+import { ArrowRight, GraduationCap, LoaderCircle, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { PasswordInput } from "@/components/auth/password-input";
@@ -8,20 +8,54 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { normalizeRegistrationPhone } from "@/lib/auth/registration-validation";
+import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const mobilePattern = /^\+?[0-9\s()-]{8,18}$/;
 
 type RegisterErrors = Partial<
   Record<"name" | "email" | "mobile" | "password" | "confirmPassword" | "exam", string>
 >;
 
+type NoticeTone = "error" | "info" | "success";
+
+async function completeStudentRegistration(accessToken: string) {
+  const response = await fetch("/api/auth/complete-student-registration", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const result = (await response.json()) as { error?: string };
+
+  if (!response.ok) {
+    throw new Error(result.error ?? "Student account setup could not be completed.");
+  }
+}
+
+function getRegistrationErrorMessage(message: string) {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("already registered") || normalized.includes("user_already_exists")) {
+    return "An account with this email already exists.";
+  }
+  if (normalized.includes("weak password") || normalized.includes("password should")) {
+    return "Choose a stronger password that meets the account requirements.";
+  }
+  if (normalized.includes("failed to fetch") || normalized.includes("network")) {
+    return "Could not reach Supabase. Check your connection and try again.";
+  }
+  return message;
+}
+
 export function RegisterForm() {
   const [notice, setNotice] = useState("");
+  const [noticeTone, setNoticeTone] = useState<NoticeTone>("info");
   const [errors, setErrors] = useState<RegisterErrors>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingAccessToken, setPendingAccessToken] = useState("");
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) return;
+
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("fullName") ?? "").trim();
     const email = String(formData.get("email") ?? "").trim();
@@ -29,11 +63,12 @@ export function RegisterForm() {
     const password = String(formData.get("password") ?? "");
     const confirmPassword = String(formData.get("confirmPassword") ?? "");
     const exam = String(formData.get("exam") ?? "");
+    const normalizedPhone = normalizeRegistrationPhone(mobile);
     const nextErrors: RegisterErrors = {};
 
-    if (name.length < 2) nextErrors.name = "Enter your full name.";
+    if (name.length < 2 || name.length > 100) nextErrors.name = "Enter a name between 2 and 100 characters.";
     if (!emailPattern.test(email)) nextErrors.email = "Enter a valid email address.";
-    if (!mobilePattern.test(mobile)) nextErrors.mobile = "Enter a valid mobile number.";
+    if (!normalizedPhone) nextErrors.mobile = "Enter a valid phone number, including its country code if needed.";
     if (password.length < 8) nextErrors.password = "Use at least 8 characters.";
     if (!confirmPassword) nextErrors.confirmPassword = "Confirm your password.";
     else if (confirmPassword !== password) nextErrors.confirmPassword = "Passwords do not match.";
@@ -42,10 +77,88 @@ export function RegisterForm() {
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
       setNotice("");
+      setPendingAccessToken("");
       return;
     }
 
-    setNotice("Validation looks good. Account creation is disabled in this preview; no account was created.");
+    setIsSubmitting(true);
+    setNotice("");
+    setPendingAccessToken("");
+
+    try {
+      const configResponse = await fetch("/api/auth/registration-config", { cache: "no-store" });
+      if (!configResponse.ok) {
+        throw new Error("Registration configuration could not be checked. No account was created.");
+      }
+
+      const config = (await configResponse.json()) as { configured?: boolean };
+      if (!config.configured) {
+        setNotice("Supabase registration is not configured. No account was created.");
+        setNoticeTone("error");
+        return;
+      }
+
+      const supabase = getSupabaseBrowserClient();
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            display_name: name,
+            phone_e164: normalizedPhone,
+            registration_exam: exam,
+          },
+          emailRedirectTo: `${window.location.origin}/register/confirm`,
+        },
+      });
+
+      if (error) {
+        setNotice(getRegistrationErrorMessage(error.message));
+        setNoticeTone("error");
+        return;
+      }
+
+      if (data.session) {
+        setPendingAccessToken(data.session.access_token);
+        await completeStudentRegistration(data.session.access_token);
+        setPendingAccessToken("");
+        setNotice("Your student account is ready. You can now sign in.");
+        setNoticeTone("success");
+      } else {
+        setNotice("Check your inbox and follow the confirmation link. Your student profile will be activated after email verification.");
+        setNoticeTone("info");
+      }
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? getRegistrationErrorMessage(error.message)
+          : "Registration could not be completed. Please try again.",
+      );
+      setNoticeTone("error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function retryStudentSetup() {
+    if (!pendingAccessToken || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      await completeStudentRegistration(pendingAccessToken);
+      setPendingAccessToken("");
+      setNotice("Your student account is ready. You can now sign in.");
+      setNoticeTone("success");
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Student account setup could not be completed. Please try again.",
+      );
+      setNoticeTone("error");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   function clearError(field: keyof RegisterErrors) {
@@ -76,7 +189,9 @@ export function RegisterForm() {
             placeholder="Your full name"
             autoComplete="name"
             minLength={2}
+            maxLength={100}
             required
+            disabled={isSubmitting}
             error={errors.name}
             onChange={() => clearError("name")}
           />
@@ -87,6 +202,7 @@ export function RegisterForm() {
             placeholder="you@example.com"
             autoComplete="email"
             required
+            disabled={isSubmitting}
             error={errors.email}
             onChange={() => clearError("email")}
           />
@@ -98,6 +214,7 @@ export function RegisterForm() {
             autoComplete="tel"
             inputMode="tel"
             required
+            disabled={isSubmitting}
             error={errors.mobile}
             onChange={() => clearError("mobile")}
           />
@@ -108,6 +225,7 @@ export function RegisterForm() {
               name="exam"
               defaultValue=""
               required
+              disabled={isSubmitting}
               aria-invalid={Boolean(errors.exam)}
               aria-describedby={errors.exam ? "exam-error" : undefined}
               onChange={() => clearError("exam")}
@@ -130,6 +248,7 @@ export function RegisterForm() {
               autoComplete="new-password"
               minLength={8}
               required
+              disabled={isSubmitting}
               error={errors.password}
               onChange={() => clearError("password")}
             />
@@ -142,20 +261,50 @@ export function RegisterForm() {
               autoComplete="new-password"
               minLength={8}
               required
+              disabled={isSubmitting}
               error={errors.confirmPassword}
               onChange={() => clearError("confirmPassword")}
             />
           </div>
 
           <div className="sm:col-span-2">
-            <Button type="submit" size="lg" className="mt-1 w-full">
-              Create student account <ArrowRight size={17} />
+            <Button type="submit" size="lg" className="mt-1 w-full" disabled={isSubmitting}>
+              {isSubmitting ? (
+                <>
+                  <LoaderCircle size={17} className="animate-spin" /> Creating account...
+                </>
+              ) : (
+                <>
+                  Create student account <ArrowRight size={17} />
+                </>
+              )}
             </Button>
           </div>
           {notice ? (
-            <p role="status" className="rounded-xl border border-indigo-100 bg-indigo-50 px-3.5 py-3 text-sm leading-5 text-indigo-800 sm:col-span-2">
+            <div
+              role={noticeTone === "error" ? "alert" : "status"}
+              className={`rounded-xl border px-3.5 py-3 text-sm leading-5 sm:col-span-2 ${
+                noticeTone === "error"
+                  ? "border-rose-200 bg-rose-50 text-rose-800"
+                  : noticeTone === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-indigo-100 bg-indigo-50 text-indigo-800"
+              }`}
+            >
               {notice}
-            </p>
+              {pendingAccessToken ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3 w-full"
+                  disabled={isSubmitting}
+                  onClick={retryStudentSetup}
+                >
+                  Retry student setup
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </form>
 

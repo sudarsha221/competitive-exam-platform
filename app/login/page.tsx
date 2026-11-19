@@ -4,7 +4,7 @@ import { LoginForm } from "@/components/auth/login-form";
 
 export const metadata: Metadata = {
   title: "Login | Northstar",
-  description: "Login UI preview for Northstar students.",
+  description: "Sign in to your Northstar account.",
 };
 
 export default function LoginPage() {

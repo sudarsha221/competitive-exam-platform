@@ -4,12 +4,12 @@ import { RegisterForm } from "@/components/auth/register-form";
 
 export const metadata: Metadata = {
   title: "Create a student account | Northstar",
-  description: "Student registration UI preview for Northstar.",
+  description: "Create a student account for Northstar exam preparation.",
 };
 
 export default function RegisterPage() {
   return (
-    <AuthShell>
+    <AuthShell footerNote="Student registration uses Supabase when configured.">
       <RegisterForm />
     </AuthShell>
   );

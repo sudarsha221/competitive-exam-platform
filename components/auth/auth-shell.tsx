@@ -13,7 +13,13 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { FadeIn } from "@/components/ui/motion";
 
-export function AuthShell({ children }: { children: ReactNode }) {
+export function AuthShell({
+  children,
+  footerNote = "UI preview only · No authentication service is connected",
+}: {
+  children: ReactNode;
+  footerNote?: string;
+}) {
   return (
     <main className="grid min-h-screen bg-[#f6f8fc] lg:grid-cols-[minmax(0,0.96fr)_minmax(0,1.04fr)]">
       <section className="relative hidden min-h-screen overflow-hidden bg-[#142344] px-10 py-9 text-white lg:flex lg:flex-col xl:px-16">
@@ -98,7 +104,7 @@ export function AuthShell({ children }: { children: ReactNode }) {
           <FadeIn>{children}</FadeIn>
         </div>
         <div className="relative z-10 mx-auto w-full max-w-[500px] pt-5 text-center text-[11px] text-slate-400">
-          UI preview only · No authentication service is connected
+          {footerNote}
         </div>
       </section>
     </main>

@@ -31,6 +31,7 @@ import {
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { LogoutButton } from "@/components/auth/logout-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -176,16 +177,15 @@ function StudentHeader({ onOpenMenu }: { onOpenMenu: () => void }) {
             </span>
             <ChevronDown size={13} className="text-slate-400" />
           </div>
-          <Button
+          <LogoutButton
             variant="outline"
             size="sm"
             className="!size-9 !min-h-9 !min-w-9 !p-0 rounded-xl sm:!h-9 sm:!w-auto sm:!px-3"
             aria-label="Log out"
-            title="Sign-out is not connected in this preview"
           >
             <LogOut size={15} />
             <span className="hidden sm:inline">Log out</span>
-          </Button>
+          </LogoutButton>
         </div>
       </div>
     </header>

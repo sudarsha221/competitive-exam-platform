@@ -12,6 +12,7 @@ import {
   Clock3,
   GraduationCap,
   LayoutDashboard,
+  LoaderCircle,
   LogOut,
   Mail,
   Menu,
@@ -27,28 +28,24 @@ import {
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import { LogoutButton } from "@/components/auth/logout-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  initialAdminTeachers,
+  fetchAdminTeachers,
+  inviteAdminTeacher,
   teacherExams,
 } from "@/components/admin/teacher-data";
 import type {
   AdminTeacher,
   TeacherActivity,
+  TeacherDraft,
   TeacherExam,
   TeacherStatus,
 } from "@/components/admin/teacher-data";
-
-type TeacherDraft = {
-  name: string;
-  email: string;
-  phone: string;
-  exams: TeacherExam[];
-  status: TeacherStatus;
-};
+import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 type TeacherFormErrors = Partial<Record<keyof TeacherDraft, string>>;
 type FilterStatus = "All statuses" | TeacherStatus;
@@ -142,7 +139,7 @@ function Sidebar({ mobile = false, onClose }: { mobile?: boolean; onClose?: () =
             <span className="text-xs font-semibold">Admin workspace</span>
           </div>
           <p className="mt-2 text-[10px] leading-4 text-indigo-100/70">
-            Sample teacher records · changes stay in this page.
+            Teacher invitations are sent by email.
           </p>
         </div>
         <div className="mt-4 flex items-center gap-2.5 px-1">
@@ -188,16 +185,15 @@ function TeacherHeader({ onOpenMenu }: { onOpenMenu: () => void }) {
             </span>
             <ChevronDown size={13} className="text-slate-400" />
           </div>
-          <Button
+          <LogoutButton
             variant="outline"
             size="sm"
             className="!size-9 !min-h-9 !min-w-9 !p-0 rounded-xl sm:!h-9 sm:!w-auto sm:!px-3"
             aria-label="Log out"
-            title="Sign-out is not connected in this preview"
           >
             <LogOut size={15} />
             <span className="hidden sm:inline">Log out</span>
-          </Button>
+          </LogoutButton>
         </div>
       </div>
     </header>
@@ -245,11 +241,13 @@ function StatCard({
 function TeacherForm({
   teacher,
   existingTeachers,
+  isSubmitting,
   onCancel,
   onSave,
 }: {
   teacher?: AdminTeacher;
   existingTeachers: AdminTeacher[];
+  isSubmitting: boolean;
   onCancel: () => void;
   onSave: (draft: TeacherDraft) => void;
 }) {
@@ -385,8 +383,11 @@ function TeacherForm({
       </fieldset>
 
       <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-4 sm:flex-row sm:justify-end">
-        <Button variant="outline" type="button" onClick={onCancel}>Cancel</Button>
-        <Button type="submit"><Check size={16} />{teacher ? "Save changes" : "Add teacher"}</Button>
+        <Button variant="outline" type="button" onClick={onCancel} disabled={isSubmitting}>Cancel</Button>
+        <Button type="submit" disabled={isSubmitting}>
+          {isSubmitting ? <LoaderCircle size={16} className="animate-spin" /> : <Check size={16} />}
+          {isSubmitting ? "Sending invitation..." : teacher ? "Save changes" : "Add teacher"}
+        </Button>
       </div>
     </form>
   );
@@ -528,14 +529,15 @@ function LoadingRows() {
           <div className="h-10 animate-pulse rounded-lg bg-slate-100" />
         </div>
       ))}
-      <span className="sr-only">Loading sample teacher records…</span>
+      <span className="sr-only">Loading teacher records…</span>
     </div>
   );
 }
 
 export function TeacherManagement() {
-  const [teachers, setTeachers] = useState<AdminTeacher[]>(initialAdminTeachers);
+  const [teachers, setTeachers] = useState<AdminTeacher[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [recentCutoff, setRecentCutoff] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [filterExam, setFilterExam] = useState<FilterExam>("All exams");
@@ -545,15 +547,36 @@ export function TeacherManagement() {
   const [notice, setNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setLoading(false), 420);
-    const cutoffTimer = window.setTimeout(() => {
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - 30);
-      setRecentCutoff(cutoff.getTime());
-    }, 0);
+    let active = true;
+
+    async function loadTeachers() {
+      try {
+        const supabase = getSupabaseBrowserClient();
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!data.session) throw new Error("Sign in as an active Admin to load teacher records.");
+        const records = await fetchAdminTeachers(data.session.access_token);
+        if (active) {
+          setTeachers(records);
+          const cutoff = new Date();
+          cutoff.setDate(cutoff.getDate() - 30);
+          setRecentCutoff(cutoff.getTime());
+        }
+      } catch (error) {
+        if (active) {
+          setNotice({
+            type: "error",
+            message: error instanceof Error ? error.message : "Teacher records could not be loaded.",
+          });
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadTeachers();
     return () => {
-      window.clearTimeout(timer);
-      window.clearTimeout(cutoffTimer);
+      active = false;
     };
   }, []);
 
@@ -588,48 +611,80 @@ export function TeacherManagement() {
   const recentlyAdded =
     recentCutoff === null
       ? "—"
-      : teachers.filter((teacher) => new Date(`${teacher.joinedAt}T00:00:00`).getTime() >= recentCutoff).length;
+      : teachers.filter(
+          (teacher) => new Date(`${teacher.joinedAt}T00:00:00`).getTime() >= recentCutoff,
+        ).length;
   const selectedTeacher =
     overlay && "teacherId" in overlay
       ? teachers.find((teacher) => teacher.id === overlay.teacherId)
       : undefined;
 
-  function saveTeacher(draft: TeacherDraft) {
-    try {
-      if (overlay?.type !== "form") throw new Error("The teacher form is no longer available.");
+  async function saveTeacher(draft: TeacherDraft) {
+    if (overlay?.type !== "form") {
+      setNotice({ type: "error", message: "The teacher form is no longer available." });
+      return;
+    }
 
-      if (overlay.teacherId) {
-        const existing = teachers.find((teacher) => teacher.id === overlay.teacherId);
-        if (!existing) throw new Error("This teacher could not be found. Refresh the page and try again.");
-        if (existing.status === "Active" && draft.status === "Inactive") {
-          setOverlay({ type: "deactivate", teacherId: existing.id, pendingDraft: draft });
+    if (!overlay.teacherId) {
+      if (isSubmitting) return;
+      setIsSubmitting(true);
+      try {
+        const supabase = getSupabaseBrowserClient();
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!data.session) throw new Error("Sign in as an active Admin before inviting a teacher.");
+
+        const invitation = await inviteAdminTeacher(data.session.access_token, draft);
+        setOverlay(null);
+
+        try {
+          const records = await fetchAdminTeachers(data.session.access_token);
+          setTeachers(records);
+        } catch {
+          setNotice({
+            type: "error",
+            message: `${invitation.message} The teacher list could not be refreshed; reload this page to update it.`,
+          });
           return;
         }
-        const activity: TeacherActivity[] = [
-          { label: "Teacher profile updated", date: "Just now" },
-          ...existing.activity,
-        ].slice(0, 5);
-        setTeachers((current) =>
-          current.map((teacher) =>
-            teacher.id === existing.id ? { ...teacher, ...draft, activity } : teacher,
-          ),
-        );
-        setNotice({ type: "success", message: `${draft.name}’s profile has been updated.` });
-      } else {
-        const nextIdNumber =
-          Math.max(0, ...teachers.map((teacher) => Number(teacher.id.replace(/\D/g, "")) || 0)) + 1;
-        const id = `TCH-${String(nextIdNumber).padStart(3, "0")}`;
-        const activity: TeacherActivity[] = [{ label: "Teacher profile created", date: "Just now" }];
-        setTeachers((current) => [{ ...draft, id, joinedAt: new Date().toISOString().slice(0, 10), activity }, ...current]);
-        setNotice({ type: "success", message: `${draft.name} has been added to the teacher list.` });
+
+        setNotice({
+          type: "success",
+          message: invitation.alreadyInvited
+            ? invitation.message
+            : `${draft.name} has been invited. Ask them to follow the email link to set a password.`,
+        });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: error instanceof Error ? error.message : "The teacher invitation could not be sent.",
+        });
+      } finally {
+        setIsSubmitting(false);
       }
-      setOverlay(null);
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message: error instanceof Error ? error.message : "The teacher could not be saved.",
-      });
+      return;
     }
+
+    const existing = teachers.find((teacher) => teacher.id === overlay.teacherId);
+    if (!existing) {
+      setNotice({ type: "error", message: "This teacher could not be found. Refresh the page and try again." });
+      return;
+    }
+    if (existing.status === "Active" && draft.status === "Inactive") {
+      setOverlay({ type: "deactivate", teacherId: existing.id, pendingDraft: draft });
+      return;
+    }
+    const activity: TeacherActivity[] = [
+      { label: "Teacher profile updated", date: "Just now" },
+      ...existing.activity,
+    ].slice(0, 5);
+    setTeachers((current) =>
+      current.map((teacher) =>
+        teacher.id === existing.id ? { ...teacher, ...draft, activity } : teacher,
+      ),
+    );
+    setNotice({ type: "success", message: `${draft.name}’s profile has been updated.` });
+    setOverlay(null);
   }
 
   function updateTeacherStatus(teacher: AdminTeacher, status: TeacherStatus, pendingDraft?: TeacherDraft) {
@@ -985,7 +1040,7 @@ export function TeacherManagement() {
               {!loading && filteredTeachers.length > 0 ? (
                 <div className="flex flex-col gap-2 border-t border-slate-100 px-4 py-3 text-[10px] text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-5">
                   <span>Showing {filteredTeachers.length} of {teachers.length} teachers</span>
-                  <span className="inline-flex items-center gap-1"><Bell size={12} /> Data is a local preview; changes are not persisted.</span>
+                  <span className="inline-flex items-center gap-1"><Bell size={12} /> Invitations persist; profile edits and status changes remain local.</span>
                 </div>
               ) : null}
             </Card>
@@ -995,7 +1050,7 @@ export function TeacherManagement() {
                 <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-white text-indigo-600 shadow-sm"><ShieldCheck size={17} /></span>
                 <div>
                   <p className="text-xs font-semibold text-[#142344]">Teacher access at a glance</p>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-500">Inactive accounts are hidden from teaching workflows in this sample view.</p>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">Inactive accounts are blocked from teacher sign-in workflows.</p>
                 </div>
               </div>
               <Link href="/admin" className="inline-flex items-center gap-1 self-start text-[11px] font-semibold text-indigo-700 transition hover:text-indigo-900 sm:self-center">
@@ -1017,6 +1072,7 @@ export function TeacherManagement() {
               key={overlay.teacherId ?? "new"}
               teacher={selectedTeacher}
               existingTeachers={teachers}
+              isSubmitting={isSubmitting}
               onCancel={() => setOverlay(null)}
               onSave={saveTeacher}
             />

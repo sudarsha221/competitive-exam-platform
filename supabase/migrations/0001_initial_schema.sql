@@ -46,7 +46,7 @@ CREATE TABLE public.student_profiles (
     student_code text NOT NULL UNIQUE,
     school_name text,
     class_level text,
-    leaderboard_opt_in boolean NOT NULL DEFAULT true,
+    leaderboard_opt_in boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -1700,6 +1700,502 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.submit_practice_answer(
+    p_practice_attempt_id uuid,
+    p_question_revision_id uuid,
+    p_selected_option_id uuid
+)
+RETURNS TABLE (
+    answer_id uuid,
+    selected_option_id uuid,
+    is_correct boolean
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_student_id uuid := auth.uid();
+    v_exam_id uuid;
+    v_attempt_status public.attempt_status;
+    v_finished_at timestamptz;
+    v_correct_option_id uuid;
+    v_is_correct boolean;
+    v_now timestamptz;
+    v_activity_date date;
+    v_answer_id uuid;
+    v_return_selected_option_id uuid;
+BEGIN
+    IF v_student_id IS NULL OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student role required';
+    END IF;
+
+    PERFORM 1
+    FROM public.profiles AS p
+    JOIN public.student_profiles AS sp ON sp.user_id = p.id
+    WHERE p.id = v_student_id
+    FOR UPDATE OF p, sp;
+
+    IF NOT FOUND OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student profile required';
+    END IF;
+
+    PERFORM 1
+    FROM public.user_roles AS ur
+    WHERE ur.user_id = v_student_id
+      AND ur.role = 'student'
+    FOR SHARE;
+
+    IF NOT FOUND OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student role required';
+    END IF;
+
+    SELECT pa.exam_id, pa.status, pa.finished_at
+    INTO v_exam_id, v_attempt_status, v_finished_at
+    FROM public.practice_attempts AS pa
+    WHERE pa.id = p_practice_attempt_id
+      AND pa.student_user_id = v_student_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Practice attempt not found or not owned';
+    END IF;
+
+    SELECT paa.id, paa.selected_option_id, paa.is_correct
+    INTO v_answer_id, v_return_selected_option_id, v_is_correct
+    FROM public.practice_attempt_answers AS paa
+    WHERE paa.practice_attempt_id = p_practice_attempt_id
+      AND paa.question_revision_id = p_question_revision_id;
+
+    IF FOUND THEN
+        RETURN QUERY
+        SELECT v_answer_id, v_return_selected_option_id, v_is_correct;
+        RETURN;
+    END IF;
+
+    IF v_attempt_status <> 'in_progress' OR v_finished_at IS NOT NULL THEN
+        RAISE EXCEPTION 'Practice attempt is not in progress';
+    END IF;
+
+    PERFORM 1
+    FROM public.student_exam_enrollments AS se
+    JOIN public.exams AS e ON e.id = se.exam_id
+    WHERE se.student_user_id = v_student_id
+      AND se.exam_id = v_exam_id
+      AND se.status = 'active'
+      AND e.is_active
+      AND private.can_access_exam(v_exam_id)
+    FOR SHARE OF se, e;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Active exam enrollment required';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.practice_attempt_answers AS paa
+        WHERE paa.practice_attempt_id = p_practice_attempt_id
+          AND paa.question_revision_id = p_question_revision_id
+    ) THEN
+        RAISE EXCEPTION 'Question has already been answered in this attempt';
+    END IF;
+
+    SELECT ak.correct_option_id
+    INTO v_correct_option_id
+    FROM public.question_revisions AS qr
+    JOIN public.questions AS q ON q.id = qr.question_id
+    JOIN public.subtopics AS st ON st.id = q.subtopic_id
+    JOIN public.chapters AS c ON c.id = st.chapter_id
+    JOIN public.subjects AS s ON s.id = c.subject_id
+    JOIN public.exams AS e ON e.id = s.exam_id
+    JOIN public.question_options AS qo
+      ON qo.question_revision_id = qr.id
+     AND qo.id = p_selected_option_id
+    JOIN private.question_answer_keys AS ak
+      ON ak.question_revision_id = qr.id
+    WHERE qr.id = p_question_revision_id
+      AND qr.status = 'published'
+      AND q.archived_at IS NULL
+      AND st.is_active
+      AND c.is_active
+      AND s.is_active
+      AND s.exam_id = v_exam_id
+      AND e.is_active
+      AND private.can_access_exam(v_exam_id)
+    FOR SHARE OF qr, q, st, c, s, e, qo, ak;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Published question or selected option is not accessible for this exam';
+    END IF;
+
+    v_now := clock_timestamp();
+    v_activity_date := (v_now AT TIME ZONE 'Asia/Kolkata')::date;
+    v_is_correct := p_selected_option_id = v_correct_option_id;
+
+    INSERT INTO public.practice_attempt_answers (
+        practice_attempt_id,
+        question_revision_id,
+        selected_option_id,
+        is_correct,
+        answered_at
+    )
+    VALUES (
+        p_practice_attempt_id,
+        p_question_revision_id,
+        p_selected_option_id,
+        v_is_correct,
+        v_now
+    )
+    RETURNING id, selected_option_id
+    INTO v_answer_id, v_return_selected_option_id;
+
+    INSERT INTO public.student_exam_stats AS ses (
+        student_user_id,
+        exam_id,
+        attempted_questions,
+        correct_answers,
+        calculated_at
+    )
+    VALUES (
+        v_student_id,
+        v_exam_id,
+        1,
+        CASE WHEN v_is_correct THEN 1 ELSE 0 END,
+        v_now
+    )
+    ON CONFLICT (student_user_id, exam_id) DO UPDATE
+    SET attempted_questions = ses.attempted_questions + 1,
+        correct_answers = ses.correct_answers
+            + CASE WHEN v_is_correct THEN 1 ELSE 0 END,
+        calculated_at = v_now;
+
+    INSERT INTO public.student_activity_daily AS sad (
+        student_user_id,
+        exam_id,
+        activity_date,
+        practice_questions,
+        correct_answers,
+        updated_at
+    )
+    VALUES (
+        v_student_id,
+        v_exam_id,
+        v_activity_date,
+        1,
+        CASE WHEN v_is_correct THEN 1 ELSE 0 END,
+        v_now
+    )
+    ON CONFLICT (student_user_id, exam_id, activity_date) DO UPDATE
+    SET practice_questions = sad.practice_questions + 1,
+        correct_answers = sad.correct_answers
+            + CASE WHEN v_is_correct THEN 1 ELSE 0 END,
+        updated_at = v_now;
+
+    RETURN QUERY
+    SELECT v_answer_id, v_return_selected_option_id, v_is_correct;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.finish_practice_attempt(
+    p_practice_attempt_id uuid
+)
+RETURNS TABLE (
+    practice_attempt_id uuid,
+    status public.attempt_status,
+    finished_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_student_id uuid := auth.uid();
+    v_status public.attempt_status;
+    v_finished_at timestamptz;
+    v_now timestamptz;
+BEGIN
+    IF v_student_id IS NULL OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student role required';
+    END IF;
+
+    PERFORM 1
+    FROM public.profiles AS p
+    JOIN public.student_profiles AS sp ON sp.user_id = p.id
+    WHERE p.id = v_student_id
+    FOR UPDATE OF p, sp;
+
+    IF NOT FOUND OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student profile required';
+    END IF;
+
+    PERFORM 1
+    FROM public.user_roles AS ur
+    WHERE ur.user_id = v_student_id
+      AND ur.role = 'student'
+    FOR SHARE;
+
+    IF NOT FOUND OR NOT private.has_role('student') THEN
+        RAISE EXCEPTION 'Active Student role required';
+    END IF;
+
+    SELECT pa.status, pa.finished_at
+    INTO v_status, v_finished_at
+    FROM public.practice_attempts AS pa
+    WHERE pa.id = p_practice_attempt_id
+      AND pa.student_user_id = v_student_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Practice attempt not found or not owned';
+    END IF;
+
+    IF v_status = 'submitted' THEN
+        IF v_finished_at IS NULL THEN
+            RAISE EXCEPTION 'Submitted practice attempt has no finish timestamp';
+        END IF;
+
+        RETURN QUERY
+        SELECT p_practice_attempt_id, v_status, v_finished_at;
+        RETURN;
+    END IF;
+
+    IF v_status <> 'in_progress' OR v_finished_at IS NOT NULL THEN
+        RAISE EXCEPTION 'Practice attempt cannot be finished from its current state';
+    END IF;
+
+    v_now := clock_timestamp();
+
+    UPDATE public.practice_attempts AS pa
+    SET status = 'submitted',
+        finished_at = v_now,
+        updated_at = v_now
+    WHERE pa.id = p_practice_attempt_id
+      AND pa.student_user_id = v_student_id
+      AND pa.status = 'in_progress'
+      AND pa.finished_at IS NULL
+    RETURNING pa.status, pa.finished_at
+    INTO v_status, v_finished_at;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Practice attempt could not be finished';
+    END IF;
+
+    RETURN QUERY
+    SELECT p_practice_attempt_id, v_status, v_finished_at;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_student_leaderboard_by_period(
+    p_exam_name text,
+    p_period public.leaderboard_period
+)
+RETURNS TABLE (
+    student_display_name text,
+    rank bigint,
+    exam_name text,
+    total_attempted_questions bigint,
+    correct_answers bigint,
+    accuracy_percentage numeric
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_requester_id uuid := auth.uid();
+    v_exam_id uuid;
+    v_today date;
+    v_start_date date;
+    v_end_date date;
+BEGIN
+    IF v_requester_id IS NULL
+       OR (
+           NOT private.has_role('student')
+           AND NOT private.has_role('admin')
+       ) THEN
+        RAISE EXCEPTION 'Active Student or Admin role required';
+    END IF;
+
+    IF p_exam_name IS NULL
+       OR lower(btrim(p_exam_name)) NOT IN ('kcet', 'neet', 'jee main') THEN
+        RAISE EXCEPTION 'Leaderboard is available for KCET, NEET, or JEE Main';
+    END IF;
+
+    IF p_period IS NULL THEN
+        RAISE EXCEPTION 'Leaderboard period is required';
+    END IF;
+
+    SELECT e.id
+    INTO v_exam_id
+    FROM public.exams AS e
+    WHERE lower(e.name) = lower(btrim(p_exam_name))
+      AND e.is_active;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Active exam not found';
+    END IF;
+
+    IF private.has_role('student')
+       AND NOT private.has_role('admin')
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.student_exam_enrollments AS se
+           WHERE se.student_user_id = v_requester_id
+             AND se.exam_id = v_exam_id
+             AND se.status = 'active'
+       ) THEN
+        RAISE EXCEPTION 'Active exam enrollment required';
+    END IF;
+
+    v_today := (statement_timestamp() AT TIME ZONE 'Asia/Kolkata')::date;
+
+    CASE p_period
+        WHEN 'daily' THEN
+            v_start_date := v_today;
+            v_end_date := v_today + 1;
+        WHEN 'weekly' THEN
+            v_start_date := date_trunc('week', v_today::timestamp)::date;
+            v_end_date := v_start_date + 7;
+        WHEN 'monthly' THEN
+            v_start_date := date_trunc('month', v_today::timestamp)::date;
+            v_end_date := (v_start_date + interval '1 month')::date;
+        WHEN 'all_time' THEN
+            v_start_date := NULL;
+            v_end_date := NULL;
+    END CASE;
+
+    RETURN QUERY
+    WITH period_stats AS (
+        SELECT
+            sad.student_user_id,
+            sad.exam_id,
+            sum(sad.practice_questions)::bigint AS attempted_questions,
+            sum(sad.correct_answers)::bigint AS correct_answers
+        FROM public.student_activity_daily AS sad
+        WHERE p_period <> 'all_time'
+          AND sad.exam_id = v_exam_id
+          AND sad.activity_date >= v_start_date
+          AND sad.activity_date < v_end_date
+        GROUP BY sad.student_user_id, sad.exam_id
+    ),
+    candidates AS (
+        SELECT
+            -- Avoid exposing a multi-part full display name on the leaderboard.
+            coalesce(
+                nullif(
+                    split_part(
+                        regexp_replace(
+                            btrim(p.display_name),
+                            '[[:space:]]+',
+                            ' ',
+                            'g'
+                        ),
+                        ' ',
+                        1
+                    ),
+                    ''
+                ),
+                'Student'
+            ) AS student_display_name,
+            p.id AS student_user_id,
+            e.name AS exam_name,
+            coalesce(
+                ses.attempted_questions,
+                ps.attempted_questions,
+                0
+            )::bigint AS total_attempted_questions,
+            coalesce(ses.correct_answers, ps.correct_answers, 0)::bigint
+                AS correct_answers
+        FROM public.exams AS e
+        JOIN public.student_exam_enrollments AS se
+          ON se.exam_id = e.id
+         AND se.status = 'active'
+        JOIN public.student_profiles AS sp
+          ON sp.user_id = se.student_user_id
+         AND sp.leaderboard_opt_in
+        JOIN public.profiles AS p
+          ON p.id = sp.user_id
+         AND p.account_status = 'active'
+        JOIN public.user_roles AS ur
+          ON ur.user_id = p.id
+         AND ur.role = 'student'
+        LEFT JOIN public.student_exam_stats AS ses
+          ON p_period = 'all_time'
+         AND ses.student_user_id = p.id
+         AND ses.exam_id = e.id
+        LEFT JOIN period_stats AS ps
+          ON p_period <> 'all_time'
+         AND ps.student_user_id = p.id
+         AND ps.exam_id = e.id
+        WHERE e.id = v_exam_id
+          AND e.is_active
+    ),
+    scored AS (
+        SELECT
+            c.*,
+            CASE
+                WHEN c.total_attempted_questions > 0 THEN
+                    round(
+                        100 * c.correct_answers::numeric
+                            / c.total_attempted_questions::numeric,
+                        2
+                    )
+                ELSE 0::numeric
+            END AS accuracy_percentage
+        FROM candidates AS c
+    ),
+    ranked AS (
+        SELECT
+            sc.student_display_name,
+            row_number() OVER (
+                ORDER BY
+                    sc.correct_answers DESC,
+                    sc.accuracy_percentage DESC,
+                    sc.total_attempted_questions DESC,
+                    sc.student_user_id
+            ) AS student_rank,
+            sc.exam_name,
+            sc.total_attempted_questions,
+            sc.correct_answers,
+            sc.accuracy_percentage
+        FROM scored AS sc
+    )
+    SELECT
+        r.student_display_name,
+        r.student_rank,
+        r.exam_name,
+        r.total_attempted_questions,
+        r.correct_answers,
+        r.accuracy_percentage
+    FROM ranked AS r
+    ORDER BY r.student_rank;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_student_leaderboard(
+    p_exam_name text
+)
+RETURNS TABLE (
+    student_display_name text,
+    rank bigint,
+    exam_name text,
+    total_attempted_questions bigint,
+    correct_answers bigint,
+    accuracy_percentage numeric
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT *
+    FROM public.get_student_leaderboard_by_period(
+        p_exam_name,
+        'all_time'::public.leaderboard_period
+    );
+$$;
+
 CREATE OR REPLACE FUNCTION private.handle_new_auth_user()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -2115,12 +2611,6 @@ CREATE POLICY practice_attempt_answers_read_owner_or_admin
               AND pa.student_user_id = auth.uid()
         )
     );
-CREATE POLICY practice_attempt_answers_insert_ungraded_owner
-    ON public.practice_attempt_answers FOR INSERT TO authenticated
-    WITH CHECK (
-        is_correct IS NULL
-        AND private.can_answer_practice(practice_attempt_id, question_revision_id)
-    );
 
 CREATE POLICY student_bookmarks_read_owner_or_admin
     ON public.student_bookmarks FOR SELECT TO authenticated
@@ -2307,8 +2797,10 @@ GRANT INSERT, UPDATE, DELETE ON public.daily_challenges TO authenticated;
 GRANT INSERT, UPDATE, DELETE ON public.challenge_questions TO authenticated;
 GRANT INSERT, UPDATE, DELETE ON public.challenge_schedules TO authenticated;
 GRANT INSERT (exam_id) ON public.practice_attempts TO authenticated;
-GRANT INSERT (practice_attempt_id, question_revision_id, selected_option_id)
-    ON public.practice_attempt_answers TO authenticated;
+REVOKE UPDATE ON public.practice_attempts
+    FROM PUBLIC, anon, authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.practice_attempt_answers
+    FROM PUBLIC, anon, authenticated;
 GRANT INSERT (student_user_id, question_id) ON public.student_bookmarks TO authenticated;
 GRANT DELETE ON public.student_bookmarks TO authenticated;
 GRANT UPDATE (note, reviewed_at) ON public.student_mistake_items TO authenticated;
@@ -2360,14 +2852,14 @@ REVOKE ALL ON FUNCTION private.can_read_question(uuid) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION private.can_read_question_revision(uuid) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION private.can_read_challenge(uuid) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION private.can_start_challenge(uuid) FROM PUBLIC, anon;
-REVOKE ALL ON FUNCTION private.can_answer_practice(uuid, uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION private.can_answer_practice(uuid, uuid)
+    FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.has_role(public.app_role) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.can_access_exam(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.can_read_question(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.can_read_question_revision(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.can_read_challenge(uuid) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.can_start_challenge(uuid) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION private.can_answer_practice(uuid, uuid) TO authenticated, service_role;
 REVOKE ALL ON FUNCTION private.touch_updated_at() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION private.guard_immutable_question_revision() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION private.guard_challenge_question() FROM PUBLIC, anon, authenticated;
@@ -2399,6 +2891,26 @@ REVOKE ALL ON FUNCTION public.submit_daily_challenge_answer(uuid, uuid)
     FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.submit_daily_challenge_answer(uuid, uuid)
     TO authenticated;
+REVOKE ALL ON FUNCTION public.submit_practice_answer(uuid, uuid, uuid)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.submit_practice_answer(uuid, uuid, uuid)
+    TO authenticated;
+REVOKE ALL ON FUNCTION public.finish_practice_attempt(uuid)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finish_practice_attempt(uuid)
+    TO authenticated;
+REVOKE ALL ON FUNCTION public.get_student_leaderboard(text)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.get_student_leaderboard(text)
+    TO authenticated;
+REVOKE ALL ON FUNCTION public.get_student_leaderboard_by_period(
+    text,
+    public.leaderboard_period
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.get_student_leaderboard_by_period(
+    text,
+    public.leaderboard_period
+) TO authenticated;
 
 -- Supabase Storage is expected to be enabled by the Supabase project.
 DO $$
@@ -2471,12 +2983,10 @@ CREATE POLICY question_imports_anon_guard
 -- TODO: Implement trusted Admin-only import processing outside SQL. Parse the
 -- accepted formats, populate previews and errors, require approval before
 -- creating question revisions, and update import counts/status transactionally.
--- TODO: Implement trusted practice grading/submission RPCs before enabling practice scoring.
--- Student answer INSERT policies accept only ungraded rows (is_correct IS NULL);
--- do not grant clients UPDATE/DELETE access to answers or completion/stat tables.
--- TODO: Implement a curated leaderboard RPC/view that returns only opted-in
--- display names and aggregate scores. Raw leaderboard tables expose only each
--- student's own row and Admin reads.
+-- Practice answers are submitted and graded through submit_practice_answer().
+-- Clients have no direct answer-write or practice-stat write privileges.
+-- Periodic leaderboards aggregate Asia/Kolkata daily activity; all-time uses
+-- student_exam_stats. Both endpoints expose only opted-in shortened names.
 -- TODO: The application must keep the private schema out of Supabase's exposed
 -- PostgREST schemas. Private helper-function grants do not make it an API schema.
 

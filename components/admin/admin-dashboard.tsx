@@ -28,6 +28,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { LogoutButton } from "@/components/auth/logout-button";
 import {
   adminCatalogCounts,
   adminExamQuestionStats,
@@ -271,17 +272,17 @@ function AdminHeader({
             </AnimatePresence>
           </div>
 
-          <Button
+          <LogoutButton
             variant="outline"
             size="sm"
             className="!size-9 !min-h-9 !min-w-9 !p-0 rounded-xl sm:!h-9 sm:!w-auto sm:!px-3"
             aria-label="Log out"
-            title="Sign-out is not connected in this preview"
-            onClick={onLogout}
+            title="Log out of your account"
+            onLogout={onLogout}
           >
             <LogOut size={15} />
             <span className="hidden sm:inline">Log out</span>
-          </Button>
+          </LogoutButton>
         </div>
       </div>
     </header>
@@ -451,7 +452,7 @@ export function AdminDashboard() {
                 exit={{ opacity: 0, y: -6 }}
                 className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
               >
-                Sign-out is not connected in this frontend preview.
+                Signing out...
                 <Button variant="ghost" size="icon" aria-label="Dismiss sign-out message" onClick={() => setLogoutNotice(false)}>
                   <X size={15} />
                 </Button>

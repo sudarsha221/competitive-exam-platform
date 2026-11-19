@@ -3,7 +3,7 @@ import { TeacherManagement } from "@/components/admin/teacher-management";
 
 export const metadata: Metadata = {
   title: "Teacher Management | Northstar",
-  description: "Manage teacher profiles, exam assignments, and account access in the Northstar admin preview.",
+  description: "Manage teacher profiles, exam assignments, and account access.",
 };
 
 export default function TeacherManagementPage() {
